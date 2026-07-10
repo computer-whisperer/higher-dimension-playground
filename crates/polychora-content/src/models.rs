@@ -12,6 +12,8 @@ pub fn entity_model(input: &EntityModelInput) -> EntityModelOutput {
         (content_ids::CONTENT_NS, content_ids::ENTITY_SEEKER) => seeker_model(input),
         (content_ids::CONTENT_NS, content_ids::ENTITY_CREEPER) => creeper_model(input),
         (content_ids::CONTENT_NS, content_ids::ENTITY_PHASE_SPIDER) => phase_spider_model(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_WRAITH) => wraith_model(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_GRAZER) => grazer_model(input),
         _ => fallback_cube(input),
     }
 }
@@ -395,6 +397,167 @@ fn phase_spider_model(input: &EntityModelInput) -> EntityModelOutput {
                 s * axis_scale[3],
             ],
             [0, 1, 0, 1, 0, 1, 0, 1],
+        ));
+    }
+
+    EntityModelOutput { parts }
+}
+
+fn wraith_model(input: &EntityModelInput) -> EntityModelOutput {
+    // Shrouded specter: a tapered hooded cloak that hovers and sways, a
+    // glowing pair of eyes, and wisps trailing off in ±w — the wisps are the
+    // 4D tell: they live half outside whatever slice you view it from.
+    let s = input.scale;
+    let anim_t = input.elapsed_s * 1.6 + input.entity_id as f32 * 0.47;
+    let hover = 0.08 * sinf(anim_t * 0.8);
+    let sway = 0.05 * sinf(anim_t * 0.55 + 0.7);
+
+    let mut parts = Vec::with_capacity(9);
+
+    // Hood — dark void crown, slightly narrowed
+    parts.push(part(
+        [sway, 0.52 + hover, 0.0, 0.0],
+        [s * 0.34, s * 0.28, s * 0.34, s * 0.34],
+        [0; 8],
+    ));
+
+    // Eyes — phase glow strip recessed in the hood's front face
+    parts.push(part(
+        [sway, 0.50 + hover, 0.26, 0.0],
+        [s * 0.20, s * 0.07, s * 0.10, s * 0.18],
+        [2; 8],
+    ));
+
+    // Cloak — broad upper robe
+    parts.push(part(
+        [sway * 0.5, 0.06 + hover, 0.0, 0.0],
+        [s * 0.46, s * 0.34, s * 0.42, s * 0.46],
+        [0, 0, 0, 1, 0, 0, 0, 0],
+    ));
+
+    // Skirt — tapering lower robe, flares with the sway
+    parts.push(part(
+        [-sway * 0.4, -0.38 + hover, 0.0, 0.0],
+        [s * (0.34 + 0.04 * sinf(anim_t)), s * 0.26, s * 0.30, s * 0.34],
+        [1, 1, 0, 1, 1, 1, 1, 1],
+    ));
+
+    // Hem wisps — ragged trailing edge below the skirt
+    parts.push(part(
+        [-sway, -0.66 + hover + 0.04 * sinf(anim_t * 1.7), 0.0, 0.0],
+        [s * 0.22, s * 0.10, s * 0.20, s * 0.24],
+        [3; 8],
+    ));
+
+    // W-wisps — smoke trails offset into ±w, fluttering out of phase.
+    for (i, w_sign) in [1.0f32, -1.0].into_iter().enumerate() {
+        let flutter = sinf(anim_t * 2.1 + i as f32 * core::f32::consts::PI);
+        parts.push(part(
+            [
+                sway * 0.3,
+                0.02 + hover + 0.10 * flutter,
+                -0.16,
+                w_sign * (0.44 + 0.10 * flutter),
+            ],
+            [s * 0.16, s * 0.24, s * 0.16, s * 0.12],
+            [3, 3, 3, 3, 2, 3, 3, 3],
+        ));
+    }
+
+    // Core ember — faint glow deep inside the cloak
+    let ember = 0.16 + 0.05 * sinf(anim_t * 2.9);
+    parts.push(part(
+        [sway * 0.5, 0.08 + hover, 0.0, 0.0],
+        [s * ember, s * ember, s * ember, s * ember],
+        [2; 8],
+    ));
+
+    EntityModelOutput { parts }
+}
+
+fn grazer_model(input: &EntityModelInput) -> EntityModelOutput {
+    // Docile herd fauna: plump mossy body on four stubby legs, a head that
+    // dips to graze when standing still, floppy w-ears, and a stub tail.
+    let s = input.scale;
+    let speed = input.speed_xzw;
+    let stride = clamp(speed / 2.4, 0.0, 1.3);
+    let anim_t = input.elapsed_s * (1.6 + stride * 3.6) + input.entity_id as f32 * 0.61;
+
+    // Grazing: when idle the head dips toward the ground on a slow cycle.
+    let graze_cycle = sinf(input.elapsed_s * 0.5 + input.entity_id as f32 * 2.3);
+    let grazing = stride < 0.15 && graze_cycle < -0.2;
+    let head_dip = if grazing { -0.34 } else { 0.06 * sinf(anim_t * 0.9) };
+
+    let body_bob = 0.03 * stride * sinf(anim_t * 2.0);
+    let body_offset = [0.0, 0.10 + body_bob, 0.0, 0.0];
+    let mut parts = Vec::with_capacity(10);
+
+    // Body — plump moss barrel, sandy belly underneath
+    parts.push(part(
+        body_offset,
+        [s * 0.52, s * 0.40, s * 0.72, s * 0.54],
+        [0, 0, 0, 2, 0, 0, 0, 0],
+    ));
+
+    // Head — forward of the body, dips to graze
+    parts.push(part(
+        add4(body_offset, [0.0, 0.30 + head_dip, 0.66, 0.0]),
+        [s * 0.26, s * 0.24, s * 0.28, s * 0.26],
+        [0, 0, 0, 2, 3, 0, 0, 0],
+    ));
+
+    // Muzzle — pale grazing snout on the head's front/underside
+    parts.push(part(
+        add4(body_offset, [0.0, 0.18 + head_dip, 0.88, 0.0]),
+        [s * 0.16, s * 0.12, s * 0.14, s * 0.16],
+        [2, 2, 3, 2, 2, 2, 2, 2],
+    ));
+
+    // W-ears — floppy flaps hanging into ±w off the head
+    for (i, w_sign) in [1.0f32, -1.0].into_iter().enumerate() {
+        let flop = 0.05 * sinf(anim_t * 1.4 + i as f32 * 1.9);
+        parts.push(part(
+            add4(
+                body_offset,
+                [0.0, 0.38 + head_dip + flop, 0.62, w_sign * 0.30],
+            ),
+            [s * 0.12, s * 0.14, s * 0.10, s * 0.08],
+            [1, 1, 1, 1, 0, 1, 1, 1],
+        ));
+    }
+
+    // Stub tail
+    parts.push(part(
+        add4(body_offset, [0.0, 0.22, -0.74, 0.0]),
+        [s * 0.10, s * 0.12, s * 0.10, s * 0.10],
+        [1; 8],
+    ));
+
+    // Legs (4) — stubby brown posts, walk cycle only when moving
+    let leg_specs: [([f32; 4], f32); 4] = [
+        ([0.30, -0.40, 0.42, 0.20], 0.0),
+        ([-0.30, -0.40, -0.42, -0.20], core::f32::consts::PI),
+        ([0.30, -0.40, -0.42, 0.20], core::f32::consts::FRAC_PI_2),
+        (
+            [-0.30, -0.40, 0.42, -0.20],
+            core::f32::consts::PI + core::f32::consts::FRAC_PI_2,
+        ),
+    ];
+    for (base_offset, phase) in leg_specs {
+        let swing = sinf(anim_t * 2.0 + phase) * stride;
+        let offset = add4(
+            body_offset,
+            [
+                base_offset[0],
+                base_offset[1] + 0.06 * max_f32(swing, 0.0),
+                base_offset[2] + 0.10 * swing,
+                base_offset[3],
+            ],
+        );
+        parts.push(part(
+            offset,
+            [s * 0.13, s * 0.26, s * 0.13, s * 0.13],
+            [1; 8],
         ));
     }
 

@@ -84,6 +84,8 @@ pub const ENTITY_DRIFTER: u32 = 0x433824fe;
 pub const ENTITY_SEEKER: u32 = 0xa974d75b;
 pub const ENTITY_CREEPER: u32 = 0x3dc5fd3d;
 pub const ENTITY_PHASE_SPIDER: u32 = 0x4af27f80;
+pub const ENTITY_WRAITH: u32 = 0x9d4e2b17;
+pub const ENTITY_GRAZER: u32 = 0x51c8a3f6;
 
 // ---- Creeper entity texture IDs (plugin namespace) ----
 

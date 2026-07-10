@@ -18,7 +18,7 @@ fn ptex(texture_id: u32) -> TextureRef {
     TextureRef { namespace: crate::NAMESPACE, texture_id }
 }
 
-/// 6 entity declarations (all non-player entities).
+/// 8 entity declarations (all non-player entities).
 /// Player entity stays in namespace 0 as an engine internal.
 ///
 /// `model_textures` provides an explicit texture palette for each entity.
@@ -204,6 +204,60 @@ pub fn entity_declarations() -> Vec<EntityDeclaration> {
                     blink_min_distance: 1.0,
                     blink_blocked_progress_epsilon: 0.08,
                 }),
+            }),
+        },
+        // Wraith — flying ambusher that stalks the player from a w-offset
+        // (invisible to a 3D-slice view) and periodically dives in through
+        // the fourth axis.
+        EntityDeclaration {
+            type_id: ENTITY_WRAITH,
+            name: String::from("wraith"),
+            category: EntityCategory::Mob,
+            default_scale: 0.72,
+            base_material_color: [38, 32, 66], // Void shroud
+            model_textures: alloc::vec![
+                tex(TEX_VOID_MIRROR),    // slot 0: shroud/cloak
+                tex(TEX_NEBULA_STRATA),  // slot 1: inner robe
+                ptex(TEX_SPIDER_PHASE),  // slot 2: eyes/core glow
+                tex(TEX_SMOKED_GLASS),   // slot 3: trailing wisps
+            ],
+            spawn_egg_texture_id: 0,
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::PhysicsDriven,
+                locomotion: MobLocomotionMode::Flying,
+                move_speed: 3.4,
+                preferred_distance: 2.2,
+                tangent_weight: 0.6,
+                aliases: alloc::vec![String::from("mobwraith")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
+            }),
+        },
+        // Grazer — passive herd fauna: wanders slowly, grazes, and bolts
+        // away when the player comes near. preferred_distance is its flee
+        // radius.
+        EntityDeclaration {
+            type_id: ENTITY_GRAZER,
+            name: String::from("grazer"),
+            category: EntityCategory::Mob,
+            default_scale: 0.66,
+            base_material_color: [92, 128, 64], // Mossy hide
+            model_textures: alloc::vec![
+                tex(TEX_BIO_SPORE_MOSS), // slot 0: hide
+                tex(TEX_BROWN),          // slot 1: legs/underside
+                tex(TEX_SAND),           // slot 2: muzzle/belly
+                tex(TEX_YELLOW_GREEN),   // slot 3: grazing accents
+            ],
+            spawn_egg_texture_id: 0,
+            sim_config: Some(EntitySimConfig {
+                mode: SimulationMode::PhysicsDriven,
+                locomotion: MobLocomotionMode::Walking,
+                move_speed: 2.4,
+                preferred_distance: 6.0,
+                tangent_weight: 0.2,
+                aliases: alloc::vec![String::from("mobgrazer")],
+                nav_target_y_offset: 0.0,
+                ability_params: None,
             }),
         },
     ]

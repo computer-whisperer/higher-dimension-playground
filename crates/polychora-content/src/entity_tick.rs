@@ -18,6 +18,8 @@ pub fn entity_tick(input: &EntityTickInput) -> EntityTickOutput {
         (content_ids::CONTENT_NS, content_ids::ENTITY_SEEKER) => seeker_tick(input),
         (content_ids::CONTENT_NS, content_ids::ENTITY_CREEPER) => creeper_tick(input),
         (content_ids::CONTENT_NS, content_ids::ENTITY_PHASE_SPIDER) => phase_spider_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_WRAITH) => wraith_tick(input),
+        (content_ids::CONTENT_NS, content_ids::ENTITY_GRAZER) => grazer_tick(input),
         _ => seeker_tick(input),
     }
 }
@@ -162,12 +164,22 @@ fn seeker_tick(input: &EntityTickInput) -> EntityTickOutput {
                 -0.10 * sinf(weave_phase),
                 0.08 * sinf(weave_phase * 1.3),
             ];
-            let pursuit = if distance > input.preferred_distance {
+            // Lunge: inside twice the preferred distance the seeker
+            // periodically pounces straight at the target instead of
+            // circling — brief, committed bursts gated on a slow sine.
+            let lunge_phase = t_s * 1.15 + input.phase_offset * 4.7;
+            let lunging =
+                distance < input.preferred_distance * 2.2 && sinf(lunge_phase) > 0.55;
+            let pursuit = if lunging {
+                1.9
+            } else if distance > input.preferred_distance {
                 1.0
             } else {
                 -0.45
             };
-            let slow = if distance < input.preferred_distance * 0.6 {
+            let slow = if lunging {
+                1.5
+            } else if distance < input.preferred_distance * 0.6 {
                 0.42
             } else {
                 1.0
@@ -394,6 +406,134 @@ fn phase_spider_tick(input: &EntityTickInput) -> EntityTickOutput {
             0.44,
         )
     };
+
+    EntityTickOutput::Steer {
+        desired_direction: desired_dir,
+        speed_factor,
+    }
+}
+
+fn wraith_tick(input: &EntityTickInput) -> EntityTickOutput {
+    let t_s = input.now_ms as f32 * 0.001;
+    let (desired_dir, speed_factor) = if let Some(target) = input.target_position {
+        let direct = normalize4_or_default(
+            [
+                target[0] - input.position[0],
+                target[1] - input.position[1],
+                target[2] - input.position[2],
+                target[3] - input.position[3],
+            ],
+            [0.0, 0.0, 1.0, 0.0],
+        );
+        if input.path_following {
+            // Blocked/no LOS: follow waypoints like any flyer.
+            (direct, 1.1)
+        } else {
+            // Ambush cycle (~9 s): stalk from a w-offset most of the time,
+            // then dive at the player straight through the fourth axis.
+            let cycle_len = 9.0f32;
+            let raw = (t_s + input.phase_offset * 2.7) / cycle_len;
+            let cycle = raw - libm::floorf(raw);
+            if cycle > 0.74 {
+                // The dive: full speed, w-offset collapses to the target.
+                (direct, 1.55)
+            } else {
+                // The stalk: hold station beside the player in w, drifting
+                // slowly around them in xz. In the player's home slice the
+                // wraith is invisible; only the w-view panes betray it.
+                let w_side = if sinf(input.phase_offset * 7.3) >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let orbit = t_s * 0.45 + input.phase_offset * 3.1;
+                let station = [
+                    target[0] + 2.4 * cosf(orbit),
+                    target[1] + 0.9,
+                    target[2] + 2.4 * sinf(orbit),
+                    target[3] + 2.6 * w_side,
+                ];
+                let to_station = [
+                    station[0] - input.position[0],
+                    station[1] - input.position[1],
+                    station[2] - input.position[2],
+                    station[3] - input.position[3],
+                ];
+                let station_dist = sqrtf(distance4_sq(station, input.position));
+                let speed = (0.35 + station_dist * 0.30).min(1.05);
+                (
+                    normalize4_or_default(to_station, direct),
+                    speed,
+                )
+            }
+        }
+    } else {
+        // Idle: slow spectral drift, mostly in the z-w plane.
+        let phase = t_s * 0.4 + input.phase_offset;
+        (
+            normalize4_or_default(
+                [
+                    0.3 * sinf(phase * 0.7),
+                    0.15 * cosf(phase * 1.1),
+                    cosf(phase),
+                    sinf(phase),
+                ],
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            0.28,
+        )
+    };
+
+    EntityTickOutput::Steer {
+        desired_direction: desired_dir,
+        speed_factor,
+    }
+}
+
+fn grazer_tick(input: &EntityTickInput) -> EntityTickOutput {
+    let t_s = input.now_ms as f32 * 0.001;
+    // preferred_distance doubles as the flee radius for passive fauna.
+    let flee_radius = input.preferred_distance.max(1.0);
+
+    let flee = input.target_position.and_then(|target| {
+        let distance = sqrtf(distance4_sq(target, input.position));
+        if distance < flee_radius {
+            let away = normalize4_or_default(
+                [
+                    input.position[0] - target[0],
+                    0.0,
+                    input.position[2] - target[2],
+                    input.position[3] - target[3],
+                ],
+                [0.0, 0.0, -1.0, 0.0],
+            );
+            // Panic scales as the threat closes in.
+            let panic = 1.35 - 0.6 * (distance / flee_radius);
+            Some((away, panic))
+        } else {
+            None
+        }
+    });
+
+    let (desired_dir, speed_factor) = flee.unwrap_or_else(|| {
+        // Wander-and-graze: amble along a slowly turning heading, pausing
+        // to graze when the gate dips low.
+        let heading = t_s * 0.22 + input.phase_offset * 5.0;
+        let graze_gate = sinf(t_s * 0.5 + input.phase_offset * 2.3);
+        let speed = if graze_gate < -0.2 { 0.0 } else { 0.3 };
+        (
+            normalize4_or_default(
+                [
+                    cosf(heading),
+                    0.0,
+                    sinf(heading),
+                    0.35 * sinf(heading * 0.6),
+                ],
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            speed,
+        )
+    });
 
     EntityTickOutput::Steer {
         desired_direction: desired_dir,
