@@ -862,11 +862,17 @@ pub(super) fn bvh_point_query(
             if !aabb_contains_point(&bounds, pos) {
                 return None;
             }
-            let (_, _, cell_aabb) = cell_at_point(pos, 0);
-            let bb = block_bounds(cell_aabb.min, 0, block);
+            // The uniform region tiles on the block's own scale lattice —
+            // report the cell at that scale (matches the iterator in
+            // for_each_block_in_kind_scaled).
+            let se = block.scale_exp;
+            if step_for_scale(se) == ChunkCoord::ZERO {
+                return None;
+            }
+            let (_, _, cell_aabb) = cell_at_point(pos, se);
             Some(BvhBlockHit {
                 block: block.clone(),
-                bounds: bb,
+                bounds: cell_aabb,
             })
         }
 
@@ -1021,8 +1027,13 @@ pub(super) fn bvh_raycast(
             let hit_pos: [ChunkCoord; 4] = std::array::from_fn(|i| {
                 origin[i].saturating_add(direction[i].saturating_mul(t_sample))
             });
-            let (_, _, cell_aabb) = cell_at_point(hit_pos, 0);
-            let bb = block_bounds(cell_aabb.min, 0, block);
+            // Cell lattice at the block's own scale (see bvh_point_query).
+            let se = block.scale_exp;
+            if step_for_scale(se) == ChunkCoord::ZERO {
+                return None;
+            }
+            let (_, _, cell_aabb) = cell_at_point(hit_pos, se);
+            let bb = cell_aabb;
             let t = region_hit.t_enter.max(ChunkCoord::ZERO);
             let hit_point =
                 std::array::from_fn(|i| origin[i].saturating_add(direction[i].saturating_mul(t)));
@@ -1295,12 +1306,16 @@ fn for_each_block_in_kind_scaled(
             }
             // Iterate the cell lattice at the block's own scale, clipped to
             // `bounds`. Bounds need not be chunk-aligned (e.g. a small
-            // uniform box from a plugin EditWorldTree effect).
+            // uniform box from a plugin EditWorldTree effect). Both edges
+            // shrink inward: only cells fully inside the bounds are emitted,
+            // so non-aligned bounds never place blocks outside the node.
             let se = block.scale_exp;
             if step_for_scale(se) == ChunkCoord::ZERO {
                 return;
             }
-            let cmin: [i32; 4] = std::array::from_fn(|i| lattice_from_fixed(bounds.min[i], se));
+            let shift = (16i32 + se as i32) as u32;
+            let cmin: [i32; 4] =
+                std::array::from_fn(|i| (-((-bounds.min[i].to_bits()) >> shift)) as i32);
             let cmax: [i32; 4] =
                 std::array::from_fn(|i| lattice_from_fixed(bounds.max[i], se) - 1);
             for cw in cmin[3]..=cmax[3] {

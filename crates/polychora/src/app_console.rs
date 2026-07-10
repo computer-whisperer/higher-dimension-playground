@@ -133,7 +133,10 @@ impl App {
                 polychora::shared::voxel::BlockData::simple(entry.namespace, entry.block_type)
                     .at_scale(scale_exp)
             };
-            let cell_min = Self::snap_to_scale_lattice(pos, scale_exp);
+            let Some(cell_min) = Self::snap_to_scale_lattice(pos, scale_exp) else {
+                self.append_dev_console_log_line("setblock: coordinates out of range");
+                return;
+            };
             self.send_multiplayer_voxel_update(Instant::now(), cell_min, block.clone());
             self.append_dev_console_log_line(format!(
                 "setblock: {} at ({}, {}, {}, {}) scale={}",
@@ -169,7 +172,10 @@ impl App {
             } else {
                 0
             };
-            let cell_min = Self::snap_to_scale_lattice(pos, scale_exp);
+            let Some(cell_min) = Self::snap_to_scale_lattice(pos, scale_exp) else {
+                self.append_dev_console_log_line("interact: coordinates out of range");
+                return;
+            };
             let Some(block) = self.scene.block_exactly_filling_cell(cell_min, scale_exp) else {
                 self.append_dev_console_log_line(format!(
                     "interact: no exact-fit block at ({}, {}, {}, {}) scale={}",
@@ -438,15 +444,19 @@ impl App {
     }
 
     /// Snap a world position down to the minimum corner of the cell that
-    /// contains it on the scale-`scale_exp` lattice.
+    /// contains it on the scale-`scale_exp` lattice. Returns `None` for
+    /// non-finite or out-of-range coordinates (fixed-point conversion would
+    /// panic on them).
     fn snap_to_scale_lattice(
         pos: [f32; 4],
         scale_exp: i8,
-    ) -> [polychora::shared::spatial::ChunkCoord; 4] {
+    ) -> Option<[polychora::shared::spatial::ChunkCoord; 4]> {
         let cell = 2f64.powi(scale_exp as i32);
-        pos.map(|v| {
-            let snapped = ((v as f64) / cell).floor() * cell;
-            polychora::shared::spatial::ChunkCoord::from_num(snapped)
-        })
+        let mut out = [polychora::shared::spatial::ChunkCoord::ZERO; 4];
+        for (axis, v) in pos.iter().enumerate() {
+            let snapped = ((*v as f64) / cell).floor() * cell;
+            out[axis] = polychora::shared::spatial::ChunkCoord::checked_from_num(snapped)?;
+        }
+        Some(out)
     }
 }

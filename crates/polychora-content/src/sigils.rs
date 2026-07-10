@@ -13,7 +13,9 @@
 //! v1 limitations (see docs/design-shapes-as-magic.md): patterns are anchored
 //! to the resonator cell (no translation search), orientation-sensitive (no
 //! rotation invariance), and superset-tolerant (extra nearby blocks are
-//! ignored). Patterns use distinct materials so they cannot shadow each other.
+//! ignored). Spatially disjoint sigils can therefore coexist around one
+//! resonator (e.g. Beacon + Summon); when more than one matches, the cast is
+//! rejected as interference rather than silently picking one.
 
 use alloc::format;
 use alloc::string::String;
@@ -100,16 +102,32 @@ const SIGIL_REGISTRY: &[&SigilDef] = &[&GATE_SIGIL, &BEACON_SIGIL, &SUMMON_SIGIL
 /// exact-fit block of the required type at the resonator's scale; extra
 /// blocks elsewhere are ignored. Pattern block types are content-plugin
 /// blocks, so they live in the content namespace.
-fn match_sigil(snapshot: &[SnapshotBlock]) -> Option<&'static SigilDef> {
-    SIGIL_REGISTRY.iter().copied().find(|sigil| {
-        sigil.cells.iter().all(|required| {
-            snapshot.iter().any(|b| {
-                b.offset == required.offset
-                    && b.namespace == CONTENT_NS
-                    && b.block_type == required.block_type
+///
+/// Returns all matching sigils; more than one means the build is ambiguous
+/// and the caster gets interference instead of an arbitrary pick.
+fn match_sigils(snapshot: &[SnapshotBlock]) -> Vec<&'static SigilDef> {
+    SIGIL_REGISTRY
+        .iter()
+        .copied()
+        .filter(|sigil| {
+            sigil.cells.iter().all(|required| {
+                snapshot.iter().any(|b| {
+                    b.offset == required.offset
+                        && b.namespace == CONTENT_NS
+                        && b.block_type == required.block_type
+                })
             })
         })
-    })
+        .collect()
+}
+
+fn match_sigil(snapshot: &[SnapshotBlock]) -> Option<&'static SigilDef> {
+    let matches = match_sigils(snapshot);
+    if matches.len() == 1 {
+        Some(matches[0])
+    } else {
+        None
+    }
 }
 
 /// Effect magnitude multiplier from the sigil's voxel scale: scale 0 → 1,
@@ -310,7 +328,16 @@ pub fn resonator_interact(input: &BlockInteractInput) -> WasmCallResult<BlockInt
         );
     }
 
-    let Some(sigil) = match_sigil(&input.structure_snapshot) else {
+    let matches = match_sigils(&input.structure_snapshot);
+    if matches.len() > 1 {
+        return WasmCallResult::with_effects(
+            BlockInteractOutput::Nothing,
+            alloc::vec![SideEffect::StatusMessage {
+                text: String::from("The resonator wavers between sigils — interference"),
+            }],
+        );
+    }
+    let Some(&sigil) = matches.first() else {
         return WasmCallResult::with_effects(
             BlockInteractOutput::Nothing,
             alloc::vec![SideEffect::StatusMessage {
@@ -396,6 +423,22 @@ mod tests {
                 block_type: c.block_type,
             })
             .collect();
+        assert!(match_sigil(&snapshot).is_none());
+    }
+
+    #[test]
+    fn coexisting_disjoint_sigils_interfere_instead_of_shadowing() {
+        // Beacon (axis neighbors) and Summon (x-z corners) occupy disjoint
+        // cells, so both can be complete around one resonator. That must
+        // read as ambiguous — not silently resolve by registry order.
+        let mut cells: Vec<([i32; 4], u32)> = BEACON_SIGIL
+            .cells
+            .iter()
+            .map(|c| (c.offset, c.block_type))
+            .collect();
+        cells.extend(SUMMON_SIGIL.cells.iter().map(|c| (c.offset, c.block_type)));
+        let snapshot = snap(&cells);
+        assert_eq!(match_sigils(&snapshot).len(), 2);
         assert!(match_sigil(&snapshot).is_none());
     }
 

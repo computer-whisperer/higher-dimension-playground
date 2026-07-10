@@ -887,6 +887,7 @@ impl App {
             polychora::block_gui::BlockInteractResult::Handled(effects) => {
                 self.process_block_interact_side_effects(
                     &effects.side_effects,
+                    block,
                     origin,
                     scale_exp,
                 );
@@ -900,6 +901,7 @@ impl App {
     fn process_block_interact_side_effects(
         &mut self,
         side_effects: &[polychora_plugin_api::side_effects::SideEffect],
+        block: &polychora::shared::voxel::BlockData,
         block_position: [polychora::shared::spatial::ChunkCoord; 4],
         block_scale_exp: i8,
     ) {
@@ -908,17 +910,17 @@ impl App {
         for effect in side_effects {
             match effect {
                 SideEffect::UpdateBlockMetadata { metadata } => {
-                    let mut block = self.scene.get_block_data(
-                        block_position[0].to_num::<i32>(),
-                        block_position[1].to_num::<i32>(),
-                        block_position[2].to_num::<i32>(),
-                        block_position[3].to_num::<i32>(),
-                    );
-                    block.extra_data = metadata.clone();
+                    // Write back onto the interacted block itself — never
+                    // re-fetch by rounded position: a fractional cell origin
+                    // (finer-scale blocks) would floor into a different cell
+                    // and clobber it.
+                    let mut updated = block.clone();
+                    updated.scale_exp = block_scale_exp;
+                    updated.extra_data = metadata.clone();
                     self.send_multiplayer_voxel_update(
                         std::time::Instant::now(),
                         block_position,
-                        block,
+                        updated,
                     );
                 }
                 SideEffect::ConsumeHeldItem { count } => {

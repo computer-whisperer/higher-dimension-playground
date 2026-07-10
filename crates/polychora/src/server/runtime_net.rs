@@ -659,6 +659,60 @@ fn apply_authoritative_voxel_edit(
     state.apply_world_voxel_edit_at_scale(position, block, scale_exp)
 }
 
+/// Cap on the number of block edits a single SetTreeCore may produce, and on
+/// the scale range it may use. The message comes straight off the wire from
+/// any client; without this, a ~60-byte tree (huge Uniform bounds at a tiny
+/// scale) pins the handler thread and OOMs the edit buffer.
+const SET_TREE_MAX_CELLS: i128 = 1 << 22;
+const SET_TREE_SCALE_RANGE: core::ops::RangeInclusive<i8> = -4..=4;
+
+/// Upper-bound the blocks `for_each_block_in_tree_scaled` would emit for this
+/// tree, computed on raw fixed-point bits in i128 so crafted extreme bounds
+/// cannot overflow the estimate. Returns None for out-of-range scales.
+fn estimate_tree_emit_cells(tree: &crate::shared::region_tree::RegionTreeCore) -> Option<i128> {
+    use crate::shared::region_tree::RegionNodeKind;
+    fn span_products(bounds: &Aabb4i, shift: u32) -> i128 {
+        let mut cells: i128 = 1;
+        for axis in 0..4 {
+            let span = (bounds.max[axis].to_bits() as i128)
+                .saturating_sub(bounds.min[axis].to_bits() as i128);
+            if span <= 0 {
+                return 0;
+            }
+            cells = cells.saturating_mul((span >> shift) + 1);
+        }
+        cells
+    }
+    match &tree.kind {
+        RegionNodeKind::Empty | RegionNodeKind::ProceduralRef(_) => Some(0),
+        RegionNodeKind::Uniform(block) => {
+            if block.is_air() || block.is_virgin() {
+                return Some(0);
+            }
+            if !SET_TREE_SCALE_RANGE.contains(&block.scale_exp) {
+                return None;
+            }
+            let shift = (16 + block.scale_exp as i32) as u32;
+            Some(span_products(&tree.bounds, shift))
+        }
+        RegionNodeKind::ChunkArray(ca) => {
+            if !SET_TREE_SCALE_RANGE.contains(&ca.scale_exp) {
+                return None;
+            }
+            // Chunk lattice shift: one chunk spans 8 cells.
+            let shift = (16 + ca.scale_exp as i32 + 3) as u32;
+            Some(span_products(&ca.bounds, shift).saturating_mul(4096))
+        }
+        RegionNodeKind::Branch(children) => {
+            let mut total: i128 = 0;
+            for child in children {
+                total = total.saturating_add(estimate_tree_emit_cells(child)?);
+            }
+            Some(total)
+        }
+    }
+}
+
 fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8]) {
     let tree: crate::shared::region_tree::RegionTreeCore = match postcard::from_bytes(tree_data) {
         Ok(t) => t,
@@ -667,6 +721,21 @@ fn handle_set_tree_core(state: &SharedState, position: [i64; 4], tree_data: &[u8
             return;
         }
     };
+
+    match estimate_tree_emit_cells(&tree) {
+        Some(cells) if cells <= SET_TREE_MAX_CELLS => {}
+        Some(cells) => {
+            eprintln!("SetTreeCore: rejected tree emitting ~{cells} cells (max {SET_TREE_MAX_CELLS})");
+            return;
+        }
+        None => {
+            eprintln!(
+                "SetTreeCore: rejected tree using scale outside {:?}",
+                SET_TREE_SCALE_RANGE
+            );
+            return;
+        }
+    }
 
     // Collect all blocks, grouped by scale_exp for bulk insertion.
     // `position` carries fixed-point ChunkCoord bits (same as SetVoxel).
