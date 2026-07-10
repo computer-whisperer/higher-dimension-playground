@@ -148,19 +148,31 @@ fn blueprint_dispenser_interact() -> WasmCallResult<BlockInteractOutput> {
         generator_version_hash: 0,
     };
 
+    let mut effects = alloc::vec![blueprint_item_effect(tree)];
+
+    // Gate sigil blueprints at tier 1 (scale 0) and tier 2 (scale -1):
+    // one placement stamps a complete, ready-to-cast sigil. The tier-2 hex
+    // packs the same sigil into 1/16th the volume and casts twice as strong.
+    for scale_exp in [0i8, -1] {
+        if let Some(tree) = crate::sigils::sigil_blueprint_tree("Gate", scale_exp) {
+            effects.push(blueprint_item_effect(tree));
+        }
+    }
+
+    WasmCallResult::with_effects(BlockInteractOutput::Nothing, effects)
+}
+
+/// Wrap a region tree into a GiveItem effect carrying a blueprint item.
+fn blueprint_item_effect(tree: polychora_plugin_api::region_tree::RegionTreeCore) -> SideEffect {
     let blueprint_meta = BlueprintMeta { tree };
     let mut item_data = Vec::new();
     ciborium::into_writer(&blueprint_meta, &mut item_data).unwrap();
-
-    WasmCallResult::with_effects(
-        BlockInteractOutput::Nothing,
-        alloc::vec![SideEffect::GiveItem {
-            item_ns: 0,
-            item_type: 3,
-            item_data,
-            count: 1,
-        }],
-    )
+    SideEffect::GiveItem {
+        item_ns: 0,
+        item_type: 3,
+        item_data,
+        count: 1,
+    }
 }
 
 /// Blueprint metadata (must match host's BlueprintMeta).

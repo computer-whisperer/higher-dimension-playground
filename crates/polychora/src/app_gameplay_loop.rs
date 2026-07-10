@@ -937,6 +937,10 @@ impl App {
                     item_data,
                     count,
                 } => {
+                    eprintln!(
+                        "GiveItem: ({item_ns:#x}, {item_type}) x{count} ({} bytes)",
+                        item_data.len()
+                    );
                     use polychora::shared::protocol::{Item, ItemStack};
                     let stack = ItemStack {
                         item: Item {

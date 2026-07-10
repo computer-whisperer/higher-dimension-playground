@@ -161,6 +161,84 @@ fn uniform_box_tree(size_cells: [i32; 4], block_type: u32, scale_exp: i8) -> Reg
     }
 }
 
+/// A single-cell uniform node at `cell` (in cells of `scale_exp`).
+fn single_cell_node(cell: [i32; 4], namespace: u32, block_type: u32, scale_exp: i8) -> RegionTreeCore {
+    let mut block = BlockData::simple(namespace, block_type);
+    block.scale_exp = scale_exp;
+    RegionTreeCore {
+        bounds: Aabb4 {
+            min: [
+                cell_coord(cell[0], scale_exp),
+                cell_coord(cell[1], scale_exp),
+                cell_coord(cell[2], scale_exp),
+                cell_coord(cell[3], scale_exp),
+            ],
+            max: [
+                cell_coord(cell[0] + 1, scale_exp),
+                cell_coord(cell[1] + 1, scale_exp),
+                cell_coord(cell[2] + 1, scale_exp),
+                cell_coord(cell[3] + 1, scale_exp),
+            ],
+        },
+        kind: RegionNodeKind::Uniform(block),
+        generator_version_hash: 0,
+    }
+}
+
+/// A complete, ready-to-cast sigil as a placeable blueprint tree: the sigil's
+/// pattern blocks plus its Resonator, all at `scale_exp`. Placing the
+/// blueprint stamps the whole "hex" in one action — the densification curve's
+/// delivery mechanism. Tree-local origin is the sigil's minimum corner; the
+/// resonator sits at the center cell.
+pub fn sigil_blueprint_tree(sigil_name: &str, scale_exp: i8) -> Option<RegionTreeCore> {
+    let sigil = SIGIL_REGISTRY
+        .iter()
+        .copied()
+        .find(|s| s.name == sigil_name)?;
+    let mut min = [i32::MAX; 4];
+    let mut max = [i32::MIN; 4];
+    for c in sigil.cells.iter().map(|c| c.offset).chain([[0; 4]]) {
+        for axis in 0..4 {
+            min[axis] = min[axis].min(c[axis]);
+            max[axis] = max[axis].max(c[axis]);
+        }
+    }
+    let shift = min;
+    let mut children = Vec::with_capacity(sigil.cells.len() + 1);
+    children.push(single_cell_node(
+        [-shift[0], -shift[1], -shift[2], -shift[3]],
+        CONTENT_NS,
+        BLOCK_RESONATOR,
+        scale_exp,
+    ));
+    for c in sigil.cells {
+        children.push(single_cell_node(
+            [
+                c.offset[0] - shift[0],
+                c.offset[1] - shift[1],
+                c.offset[2] - shift[2],
+                c.offset[3] - shift[3],
+            ],
+            CONTENT_NS,
+            c.block_type,
+            scale_exp,
+        ));
+    }
+    Some(RegionTreeCore {
+        bounds: Aabb4 {
+            min: [ChunkCoord::ZERO; 4],
+            max: [
+                cell_coord(max[0] - min[0] + 1, scale_exp),
+                cell_coord(max[1] - min[1] + 1, scale_exp),
+                cell_coord(max[2] - min[2] + 1, scale_exp),
+                cell_coord(max[3] - min[3] + 1, scale_exp),
+            ],
+        },
+        kind: RegionNodeKind::Branch(children),
+        generator_version_hash: 0,
+    })
+}
+
 fn sigil_effects(sigil: &SigilDef, scale_exp: i8) -> (Vec<SideEffect>, String) {
     let mult = tier_multiplier(scale_exp);
     let cell = cell_size(scale_exp);
@@ -362,6 +440,65 @@ mod tests {
         // 32 cells at scale −1 → 16 world units tall, 0.5 wide.
         assert_eq!(tree.bounds.max[1], ChunkCoord::from_num(16));
         assert_eq!(tree.bounds.max[0], ChunkCoord::from_num(0.5));
+    }
+
+    /// Decompose a blueprint tree back into (cell, ns, type) tuples.
+    fn blueprint_cells(tree: &RegionTreeCore, scale_exp: i8) -> Vec<([i32; 4], u32, u32)> {
+        let RegionNodeKind::Branch(children) = &tree.kind else {
+            panic!("expected Branch blueprint tree");
+        };
+        children
+            .iter()
+            .map(|child| {
+                let RegionNodeKind::Uniform(block) = &child.kind else {
+                    panic!("expected Uniform child");
+                };
+                assert_eq!(block.scale_exp, scale_exp);
+                let cell = core::array::from_fn(|i| {
+                    let unit = cell_coord(1, scale_exp);
+                    (child.bounds.min[i] / unit).to_num::<i32>()
+                });
+                (cell, block.namespace, block.block_type)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gate_blueprint_satisfies_its_own_sigil() {
+        for scale_exp in [0i8, -1] {
+            let tree = sigil_blueprint_tree("Gate", scale_exp).expect("gate blueprint");
+            let cells = blueprint_cells(&tree, scale_exp);
+            assert_eq!(cells.len(), 9, "resonator + 8 ring cells");
+
+            let (resonator_cell, _, _) = *cells
+                .iter()
+                .find(|(_, ns, ty)| *ns == CONTENT_NS && *ty == BLOCK_RESONATOR)
+                .expect("blueprint contains a resonator");
+
+            // View the placed blueprint as a snapshot around its resonator.
+            let snapshot: Vec<SnapshotBlock> = cells
+                .iter()
+                .map(|(cell, ns, ty)| SnapshotBlock {
+                    offset: core::array::from_fn(|i| cell[i] - resonator_cell[i]),
+                    namespace: *ns,
+                    block_type: *ty,
+                })
+                .collect();
+            let matched = match_sigil(&snapshot).expect("blueprint must satisfy its sigil");
+            assert_eq!(matched.name, "Gate");
+        }
+    }
+
+    #[test]
+    fn gate_blueprint_tier2_packs_same_sigil_at_half_scale() {
+        let tier1 = sigil_blueprint_tree("Gate", 0).expect("tier 1");
+        let tier2 = sigil_blueprint_tree("Gate", -1).expect("tier 2");
+        // Same footprint shape (1 x 1 x 3 x 3 cells), half the world extent.
+        for axis in 0..4 {
+            assert_eq!(tier1.bounds.max[axis], tier2.bounds.max[axis] * 2);
+        }
+        assert_eq!(tier1.bounds.max[2], ChunkCoord::from_num(3));
+        assert_eq!(tier2.bounds.max[2], ChunkCoord::from_num(1.5f32));
     }
 
     #[test]
